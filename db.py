@@ -43,8 +43,46 @@ CREATE TABLE IF NOT EXISTS payments (
     charge_id TEXT, created_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_history_user ON history(user_id, id);
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
 """
 )
+
+# مهاجرت دیتابیس‌های قدیمی (ستون‌های جدید)
+_cols = {r["name"] for r in _conn.execute("PRAGMA table_info(users)")}
+if "whitelisted" not in _cols:
+    _conn.execute("ALTER TABLE users ADD COLUMN whitelisted INTEGER DEFAULT 0")
+if "daily_limit" not in _cols:
+    _conn.execute("ALTER TABLE users ADD COLUMN daily_limit INTEGER")
+if "admin_perms" not in _cols:  # NULL = مدیر نیست؛ رشته = دسترسی‌ها با کاما
+    _conn.execute("ALTER TABLE users ADD COLUMN admin_perms TEXT")
+
+
+# ---------------- تنظیمات عمومی ربات ----------------
+def get_setting(key: str, default=None):
+    r = _conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return r["value"] if r else default
+
+
+def set_setting(key: str, value):
+    _conn.execute("INSERT INTO settings (key, value) VALUES (?, ?) "
+                  "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
+
+
+def del_setting(key: str):
+    _conn.execute("DELETE FROM settings WHERE key=?", (key,))
+
+
+def daily_free_default() -> int:
+    try:
+        return int(get_setting("daily_free", config.DAILY_FREE_CREDITS))
+    except ValueError:
+        return config.DAILY_FREE_CREDITS
+
+
+def daily_limit_for(u) -> int:
+    if u is not None and u["daily_limit"] is not None:
+        return u["daily_limit"]
+    return daily_free_default()
 
 
 def _today() -> str:
@@ -68,7 +106,28 @@ def get_user(uid: int):
 
 
 ALLOWED_FIELDS = {"voice_id", "voice_name", "model_id", "stability", "similarity",
-                  "style", "speed", "lang", "output", "blocked", "balance"}
+                  "style", "speed", "lang", "output", "blocked", "balance", "whitelisted", "daily_limit", "admin_perms"}
+
+
+def ensure_user(uid: int):
+    """کاربری که هنوز ربات را استارت نکرده هم قابل ثبت باشد (مثلاً برای لیست سفید)."""
+    _conn.execute("INSERT OR IGNORE INTO users (id, joined_at, last_seen, model_id) VALUES (?, ?, 0, ?)",
+                  (uid, int(time.time()), config.DEFAULT_MODEL_ID))
+    return get_user(uid)
+
+
+def find_user(query: str):
+    """با آیدی عددی یا @username کاربر را پیدا می‌کند."""
+    q = query.strip()
+    if q.lstrip("-").isdigit():
+        return get_user(int(q))
+    if q.startswith("@"):
+        q = q[1:]
+    return _conn.execute("SELECT * FROM users WHERE lower(username)=lower(?)", (q,)).fetchone()
+
+
+def whitelisted_users():
+    return _conn.execute("SELECT * FROM users WHERE whitelisted=1 ORDER BY first_name").fetchall()
 
 
 def set_field(uid: int, field: str, value):
@@ -76,8 +135,24 @@ def set_field(uid: int, field: str, value):
     _conn.execute(f"UPDATE users SET {field}=? WHERE id=?", (value, uid))
 
 
-def add_balance(uid: int, amount: int):
-    _conn.execute("UPDATE users SET balance = balance + ? WHERE id=?", (amount, uid))
+def add_balance(uid: int, amount: int) -> int:
+    """موجودی را تغییر می‌دهد (کمتر از صفر نمی‌شود) و مقدار واقعی تغییر را برمی‌گرداند."""
+    row = get_user(uid)
+    old = row["balance"] if row else 0
+    new = max(0, old + amount)
+    _conn.execute("UPDATE users SET balance=? WHERE id=?", (new, uid))
+    return new - old
+
+
+def sub_admins():
+    return _conn.execute("SELECT * FROM users WHERE admin_perms IS NOT NULL ORDER BY first_name").fetchall()
+
+
+def admin_perms_of(uid: int):
+    row = _conn.execute("SELECT admin_perms FROM users WHERE id=?", (uid,)).fetchone()
+    if not row or row["admin_perms"] is None:
+        return None
+    return {p for p in row["admin_perms"].split(",") if p}
 
 
 def used_today(uid: int) -> int:
@@ -88,7 +163,7 @@ def used_today(uid: int) -> int:
 def remaining(uid: int) -> tuple[int, int]:
     """(باقی‌ماندهٔ رایگان امروز، موجودی خریداری‌شده)"""
     u = get_user(uid)
-    free = max(0, config.DAILY_FREE_CREDITS - used_today(uid))
+    free = max(0, daily_limit_for(u) - used_today(uid))
     return free, (u["balance"] if u else 0)
 
 
@@ -157,6 +232,7 @@ def stats() -> dict:
         "active_24h": q("SELECT COUNT(*) FROM users WHERE last_seen > ?", day_ago),
         "new_24h": q("SELECT COUNT(*) FROM users WHERE joined_at > ?", day_ago),
         "blocked": q("SELECT COUNT(*) FROM users WHERE blocked=1"),
+        "whitelisted": q("SELECT COUNT(*) FROM users WHERE whitelisted=1"),
         "used_today": q("SELECT SUM(used) FROM usage WHERE day=?", _today()),
         "used_total": q("SELECT SUM(used) FROM usage"),
         "generations": q("SELECT COUNT(*) FROM history"),

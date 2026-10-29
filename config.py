@@ -20,7 +20,7 @@ def _list(name: str) -> list[str]:
 
 # --- ضروری ---
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-ELEVENLABS_API_KEY = os.environ["ELEVENLABS_API_KEY"]
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")  # از پنل مدیریت هم قابل تغییر است
 
 # --- دسترسی و مدیریت ---
 ADMIN_IDS = _ids("ADMIN_IDS")                    # آیدی ادمین‌ها
@@ -42,6 +42,7 @@ SFX_MODEL_ID = os.getenv("SFX_MODEL_ID", "eleven_text_to_sound_v2")
 DAILY_FREE_CREDITS = _int("DAILY_FREE_CREDITS", 2000)
 MAX_TEXT_CHARS = _int("MAX_TEXT_CHARS", 5000)
 MAX_FILE_CHARS = _int("MAX_FILE_CHARS", 20000)
+TTS_RATE = float(os.getenv("COST_TTS", "1"))  # اعتبار به ازای هر کاراکتر
 COSTS = {
     "stt": _int("COST_STT", 300),
     "changer": _int("COST_CHANGER", 500),

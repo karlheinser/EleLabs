@@ -128,16 +128,116 @@ def settings_kb(u) -> M:
     ])
 
 
-def credit_kb() -> M:
-    rows = [[btn(f"⭐ {stars} ستاره ← {credits:,} اعتبار", f"buy:{i}")]
-            for i, (credits, stars) in enumerate(config.STAR_PACKAGES)]
+COST_LABELS = {
+    "tts": "🗣 متن به صدا / دیالوگ / فایل (هر کاراکتر)",
+    "stt": "📝 ویس به متن",
+    "changer": "🔄 تغییر صدا",
+    "isolate": "🧹 حذف نویز",
+    "dub": "🎬 دوبله",
+    "clone": "🧬 شبیه‌سازی صدا",
+    "design": "🎨 طراحی صدا",
+    "sfx": "💥 افکت صوتی",
+    "music": "🎵 ساخت موسیقی (هر دقیقه)",
+}
+
+
+def num(v) -> str:
+    v = float(v)
+    return f"{int(v):,}" if v.is_integer() else f"{v:g}"
+
+
+def package_label(p) -> str:
+    title = f"{p['title']} · " if p.get("title") else ""
+    return f"{title}{p['credits']:,} اعتبار ← ⭐ {p['stars']:,}"
+
+
+def credit_kb(pkgs: list, enabled: bool) -> M:
+    rows = [[btn(f"⭐ {package_label(p)}", f"buy:{i}")] for i, p in enumerate(pkgs)] if enabled else []
     rows.append([HOME])
     return M(rows)
 
 
-def admin_kb() -> M:
-    return M([
-        [btn("📊 آمار", "a:stats"), btn("💼 حساب ElevenLabs", "a:acct")],
-        [btn("📢 پیام همگانی", "a:bc"), btn("🚫 مسدود / آزاد", "a:block")],
-        [btn("➕ افزودن اعتبار", "a:credit"), HOME],
-    ])
+DEFAULT_CLOSED_MSG = ("🔒 <b>ربات در حال حاضر بسته است.</b>\n\n"
+                      "فعلاً فقط کاربران ویژه می‌تونن از ربات استفاده کنن. لطفاً بعداً دوباره سر بزن 🙏")
+
+
+# بخش‌های پنل مدیریت که می‌شود به هر مدیر داد
+ADMIN_PERMS = {
+    "access": "🔓 باز/بسته کردن ربات",
+    "users": "👤 کاربران و لیست سفید",
+    "credit": "💳 اعتبار و سهمیهٔ کاربران",
+    "daily": "🎁 اعتبار روزانه",
+    "costs": "💰 هزینه‌ها",
+    "packages": "⭐ بسته‌های استارز",
+    "stats": "📊 آمار",
+    "acct": "💼 حساب ElevenLabs",
+    "api": "🔑 کلید API",
+    "bc": "📢 پیام همگانی",
+    "voices": "🎤 حذف صداهای حساب",
+}
+
+
+def admin_kb(perms: set, owner: bool, is_open: bool, daily: int) -> M:
+    can = lambda p: owner or p in perms  # noqa: E731
+    rows = []
+    if can("access"):
+        rows.append([btn("🟢 ربات باز است ← بستن" if is_open else "🔴 ربات بسته است ← باز کردن", "a:toggle")])
+    r = []
+    if can("access"):
+        r.append(btn("✉️ پیام حالت بسته", "a:cmsg"))
+    if can("users"):
+        r.append(btn("⭐ لیست سفید", "a:wl"))
+    if can("users") or can("credit"):
+        r.append(btn("👤 مدیریت کاربر", "a:user"))
+    if can("daily"):
+        r.append(btn(f"🎁 اعتبار روزانه: {daily:,}", "a:daily"))
+    if can("costs"):
+        r.append(btn("💰 هزینه‌ها", "a:costs"))
+    if can("packages"):
+        r.append(btn("⭐ بسته‌های استارز", "p:list"))
+    if can("stats"):
+        r.append(btn("📊 آمار", "a:stats"))
+    if can("acct"):
+        r.append(btn("💼 حساب ElevenLabs", "a:acct"))
+    if can("api"):
+        r.append(btn("🔑 کلید API", "a:api"))
+    if owner:
+        r.append(btn("👑 مدیران", "a:admins"))
+    if can("bc"):
+        r.append(btn("📢 پیام همگانی", "a:bc"))
+    rows += rows2(r)
+    rows.append([HOME])
+    return M(rows)
+
+
+def user_card_kb(u, perms: set, owner: bool) -> M:
+    uid = u["id"]
+    can = lambda p: owner or p in perms  # noqa: E731
+    rows = []
+    if can("users"):
+        rows.append([btn("❌ حذف از لیست سفید" if u["whitelisted"] else "⭐ افزودن به لیست سفید", f"u:wl:{uid}"),
+                     btn("✅ رفع مسدودی" if u["blocked"] else "🚫 مسدود کردن", f"u:bl:{uid}")])
+    row = []
+    if can("credit"):
+        row.append(btn("➕ افزودن / کسر اعتبار", f"u:add:{uid}"))
+    if owner:
+        row.append(btn("👑 تنظیم مدیر", f"g:v:{uid}"))
+    if row:
+        rows.append(row)
+    if can("credit"):
+        rows.append([btn("🎁 سهمیهٔ روزانهٔ اختصاصی", f"u:dl:{uid}"), btn("♻️ سهمیهٔ پیش‌فرض", f"u:dlr:{uid}")])
+    rows.append([btn("🔄 به‌روزرسانی", f"u:v:{uid}"), btn("🔙 پنل مدیریت", "m:admin")])
+    return M(rows)
+
+
+def admin_perm_kb(uid: int, perms) -> M:
+    """perms = None یعنی مدیر نیست."""
+    cur = perms or set()
+    rows = rows2([btn(("✅ " if p in cur else "⬜ ") + label, f"g:t:{uid}:{p}") for p, label in ADMIN_PERMS.items()])
+    if perms is None:
+        rows.insert(0, [btn("👑 ثبت به‌عنوان مدیر", f"g:mk:{uid}")])
+    else:
+        rows.append([btn("✅ دسترسی کامل", f"g:all:{uid}"), btn("⬜ برداشتن همه", f"g:none:{uid}")])
+        rows.append([btn("❌ حذف از مدیران", f"g:rm:{uid}")])
+    rows.append([btn("👤 کارت کاربر", f"u:v:{uid}"), btn("👑 مدیران", "a:admins")])
+    return M(rows)

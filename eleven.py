@@ -4,13 +4,37 @@ import re
 import httpx
 
 import config
+import db
 
 API = "https://api.elevenlabs.io/v1"
 _client: httpx.AsyncClient | None = None
 
 
 class ElevenError(Exception):
-    pass
+    def __init__(self, msg: str, status: str = ""):
+        super().__init__(msg)
+        self.status = status  # مثل quota_exceeded یا invalid_api_key
+
+
+def current_key() -> str:
+    """کلید ثبت‌شده از پنل مدیریت؛ اگر نبود، کلید فایل .env"""
+    return db.get_setting("api_key") or config.ELEVENLABS_API_KEY
+
+
+def key_source() -> str:
+    return "panel" if db.get_setting("api_key") else ("env" if config.ELEVENLABS_API_KEY else "none")
+
+
+def mask(key: str) -> str:
+    if not key:
+        return "—"
+    return key[:5] + "…" + key[-4:] if len(key) > 12 else "…" + key[-3:]
+
+
+async def _add_key(request: httpx.Request):
+    # کلید در لحظهٔ هر درخواست خوانده می‌شود ← تغییر کلید بدون ری‌استارت اعمال می‌شود
+    if "xi-api-key" not in request.headers:
+        request.headers["xi-api-key"] = current_key()
 
 
 def client() -> httpx.AsyncClient:
@@ -18,10 +42,29 @@ def client() -> httpx.AsyncClient:
     if _client is None:
         _client = httpx.AsyncClient(
             base_url=API,
-            headers={"xi-api-key": config.ELEVENLABS_API_KEY},
             timeout=httpx.Timeout(300, connect=20),
+            event_hooks={"request": [_add_key]},
         )
     return _client
+
+
+async def check_key(key: str) -> tuple[str, dict | str]:
+    """کلید جدید را تست می‌کند → ("ok", subscription) | ("invalid", msg) | ("warn", msg)"""
+    try:
+        r = await client().get("/user/subscription", headers={"xi-api-key": key}, timeout=30)
+    except httpx.HTTPError as e:
+        return "warn", f"اتصال به ElevenLabs برقرار نشد ({type(e).__name__})"
+    if r.status_code < 400:
+        return "ok", r.json()
+    try:
+        detail = r.json().get("detail", {})
+    except Exception:
+        detail = {}
+    status = detail.get("status", "") if isinstance(detail, dict) else ""
+    message = (detail.get("message") if isinstance(detail, dict) else str(detail)) or r.text
+    if r.status_code == 401 and status != "missing_permissions":
+        return "invalid", str(message)[:300]
+    return "warn", str(message)[:300]
 
 
 async def close():
@@ -31,15 +74,17 @@ async def close():
 
 def _check(r: httpx.Response) -> httpx.Response:
     if r.status_code >= 400:
+        status = ""
         try:
             detail = r.json().get("detail", r.text)
             if isinstance(detail, dict):
+                status = str(detail.get("status") or "")
                 detail = detail.get("message") or detail.get("status") or str(detail)
             elif isinstance(detail, list):
                 detail = "; ".join(str(d.get("msg", d)) for d in detail)
         except Exception:
             detail = r.text
-        raise ElevenError(f"{r.status_code}: {str(detail)[:300]}")
+        raise ElevenError(f"{r.status_code}: {str(detail)[:300]}", status)
     return r
 
 
